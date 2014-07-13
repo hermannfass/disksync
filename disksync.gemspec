@@ -6,10 +6,10 @@ require 'disksync/version'
 Gem::Specification.new do |spec|
   spec.name          = "disksync"
   spec.version       = Disksync::VERSION
-  spec.authors       = ["TODO: Write your name"]
-  spec.email         = ["TODO: Write your email address"]
-  spec.summary       = %q{TODO: Write a short summary. Required.}
-  spec.description   = %q{TODO: Write a longer description. Optional.}
+  spec.authors       = ["Hermann A. Faß"]
+  spec.email         = ["hf@zwergfell.de"]
+  spec.summary       = %q{Synchronize data between directories.}
+  spec.description   = %q{Wrapper for Rsync dedicated to user data backup.}
   spec.homepage      = ""
   spec.license       = "MIT"
 

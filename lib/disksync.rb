@@ -4,7 +4,9 @@ require "disksync/version"
 #     # Your code goes here...
 # end
 
-
+# Allows access to information about the computer on which the code is
+# executed, e.g. retrieving the path to a recently mounted USB volume or the
+# type of Operating System.
 class ComputerSystem
 
     DefaultMacUsbMountPointParent = '/Volumes'
@@ -68,6 +70,20 @@ class ComputerSystem
 end
 
 
+# Can synchronize data between the user's directories (herein called 'local')
+# and another disk, herein called 'remote' system. 
+# Efficient use of this class works as follows:
+# # Instantiate it.
+# # Set @local_base_path (or leave default, DefaultLocalBasePath).
+# # Set @data_subdirs to an Array of subdirectory names (for non-BLOB data).
+# # Set @blob_subdirs to an Array of subdirectory names (for BLOBs).
+# # Call the synchronize_all() method.
+# 
+# Alternatively:
+# For individual directories you might as well call directly
+# synchronize_subdir_list(), passing the names of the subdirectories to be
+# synchronized in an Array. In that case, before calling
+# synchronize_subdir_list(), set @effective_rsync_options appropriately.
 class DiskSynchronizer
 
     DefaultLocalBasePath  = File.join( ENV['HOME'], '_local_working_copy' )
@@ -82,11 +98,22 @@ class DiskSynchronizer
     attr_accessor :data_subdirs
     attr_accessor :blob_subdirs
     attr_accessor :rsync_path
+    attr_accessor :effective_rsync_options
+
+    # Rsync options for the synchronization of data (i.e. not BLOBs).
+    # It should be possible to add appropriate optinos (-e) for Rsync-over-SSH.
+    # This attribute is an Array of Strings that get joined with a space
+    # character when included in Rsync calls.
     attr_accessor :data_rsync_options
+
+    # Rsync options for the synchronization of BLOBs.
+    # It should be possible to add appropriate optinos (-e) for Rsync-over-SSH.
+    # This attribute is an Array of Strings that get joined with a space
+    # character when included in Rsync calls.
     attr_accessor :blob_rsync_options
 
     # Direction of synchronization. Can be :push (from local to remote) or
-    # "pull" (vice versa).
+    # :pull (vice versa). 
     attr_accessor :direction
 
     # This computer system (OS, path conventions etc.)
@@ -117,7 +144,11 @@ class DiskSynchronizer
     end
 
     # Synchronize a list of subdirectories from @local_base_path to
-    # @remote_base_path.
+    # @remote_base_path (when direction is :push) or in the opposite
+    # direction (when direction is :pull).
+    # Subdirectories (subdirs) that do not exist in the @local_base_path or in
+    # the @remote_base_path get skipped. Thus, when pushing to a remote disk
+    # make sure the top level directories are existing.
     def synchronize_subdir_list( subdirs, direction = @direction )
         puts "\nTrying to #{direction} the following subdirectories:"
         subdirs.each { |d| puts "  - #{d}" }
@@ -155,8 +186,11 @@ class DiskSynchronizer
         end
     end
 
-    # Synchronize a local directory to a remote directory (:push) or vice
-    # versa (pull).
+    # Synchronize a local directory to a remote directory (direction :push) or
+    # vice versa (direction :pull). The path names are full path names. You
+    # can use this method, but it is recommended to set the base directories
+    # and the subdirectory lists (@data_subdirs, @blob_subdirs)
+    # correctly and then use the synchronize_all().
     def synchronize( local_path, remote_path, direction = @direction )
         # Construct Rsync call and go
         if (direction == :push) 
@@ -181,9 +215,6 @@ class DiskSynchronizer
 end
 
 
-
-ds = DiskSynchronizer.new
-ds.synchronize_all(:push)
 
 
 
