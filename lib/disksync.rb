@@ -1,49 +1,189 @@
-# require "disksync/version"
+require "disksync/version"
 
 # module Disksync
-  # Your code goes here...
+#     # Your code goes here...
 # end
+
+
+class ComputerSystem
+
+    DefaultMacUsbMountPointParent = '/Volumes'
+    DefaultLinuxUsbMountPoint = ''
+
+    attr_reader :os
+
+    def initialize()
+        @os = case RUBY_PLATFORM
+            when /darwin/i then :mac
+            when /linux/i then :linux
+            when /cygwin/i then :cygwin
+        end
+        @usb_parent_dir = case @os
+            when :mac then DefaultMacUsbMountPointParent 
+            else 'undefined'
+        end
+    end
+
+    # Escape paths as Rsync input on the specific OS
+    def rsync_path_escape( path )
+        if (@os == :mac)
+            '"' + path + '"'
+        else
+            # Adapt to other OSs if necessary
+            '"' + path + '"'
+        end
+    end
+
+    # Escape paths for directory handling (e.g. Dir::mkdir)
+    def ruby_path_escape( path )
+        if (@os == :mac)
+            '"' + path + '"'
+        else
+            # Adapt to other OSs if necessary
+            '"' + path + '"'
+        end
+    end
+
+    def last_automounted_usb_volume()
+        if (@os == :mac)
+            # Note that a USB device might contain spaces like in "USB DISK".
+            File.join(
+                DefaultMacUsbMountPointParent,
+                Dir.entries(DefaultMacUsbMountPointParent).reject{ |f|
+                    f.match(/\.\.?/)
+                }.sort{ |a,b|
+                    File.ctime( File.join(@usb_parent_dir, a) ) <=>
+                    File.ctime( File.join(@usb_parent_dir, b) )
+                }[-1]
+            ) 
+        elsif (@os == :linux)
+            # Whatever will work for Linux goes here 
+        elsif (@os == :cygwin)
+            # Whatever will work for Cygwin goes here
+        else
+            nil
+        end
+    end
+
+end
+
 
 class DiskSynchronizer
 
-    DefaultBasePath = '~/_local_working_copy'
+    DefaultLocalBasePath  = File.join( ENV['HOME'], '_local_working_copy' )
     DefaultDataSubdirs = [ 'MeineDokumente', '_security' ]
     DefaultBlobSubdirs = [ 'BLOBs' ]
     DefaultRsyncOptions = [ '-rtv', '--modify-window=2' ]
     DefaultDataRsyncOptions = [ '--delete' ]
     DefaultBlobRsyncOptions = [ '--size-only' ]
 
+    attr_accessor :local_base_path
+    attr_accessor :remote_base_path
     attr_accessor :data_subdirs
     attr_accessor :blob_subdirs
-    attr_accessor :rsync_options
+    attr_accessor :rsync_path
+    attr_accessor :data_rsync_options
+    attr_accessor :blob_rsync_options
 
+    # Direction of synchronization. Can be :push (from local to remote) or
+    # "pull" (vice versa).
+    attr_accessor :direction
+
+    # This computer system (OS, path conventions etc.)
+    attr_reader :this_system
 
     def initialize()
-        rsync_path = `which rsync`
+        @rsync_path = `which rsync`.strip
+        @data_rsync_options = DefaultRsyncOptions + DefaultDataRsyncOptions
+        @blob_rsync_options = DefaultRsyncOptions + DefaultBlobRsyncOptions
+        @effective_rsync_options = @data_rsync_options
+        @local_base_path  = DefaultLocalBasePath
+        @this_system = ComputerSystem.new
+        @remote_base_path = @this_system.last_automounted_usb_volume()
+        @data_subdirs = DefaultDataSubdirs
+        @blob_subdirs = DefaultBlobSubdirs
+        @direction = :push
     end
 
-    def synchronize_all()
-        if (@data_subdirs.empty?)
-            @data_subdirs = DefaultDataSubdirs.collect {|d| File.directory?(d)
-}
-        @data_subdirs = DefaultDataSubdirs.collect if (@data_subdirs.empty?)
-        @blob_subdirs = DefaultDataSubdirs if (@blob_subdirs.empty?)
-        @data_subdirs.each |dir|
-            synchronize
-        
-
+    # Synchronize all subdirectories contained in @data_subdirs and
+    # @blob_subdirs, applying the appropriate rsync options for data and BLOBs
+    # accordingly.
+    def synchronize_all( direction = @direction )
+        puts "Preparing to #{direction} all data and BLOB directories."
+        @effective_rsync_options = @data_rsync_options
+        self.synchronize_subdir_list( @data_subdirs, direction )
+        @effective_rsync_options = @blob_rsync_options
+        self.synchronize_subdir_list( @blob_subdirs, direction )
     end
 
-    def available_default_data_subdirs()
-        @data_subdirs.collect { |d| File.directory?(d) }
-        
-        
+    # Synchronize a list of subdirectories from @local_base_path to
+    # @remote_base_path.
+    def synchronize_subdir_list( subdirs, direction = @direction )
+        puts "\nTrying to #{direction} the following subdirectories:"
+        subdirs.each { |d| puts "  - #{d}" }
+        subdirs.each do |d|
+            puts "\n#{d}:"
+            local_path = File.join( @local_base_path, d )
+            unless File.directory?(local_path)
+                puts "#{local_path} not on local disk. Skipped!"
+                next
+            end
+            puts "#{local_path} exists on local disk."
+            remote_path = File.join( @remote_base_path, d ) 
+            unless File.directory?(remote_path)
+                puts "#{remote_path} does not exist on remote disk. Skipped!"
+                next
+                # To do:
+                # Creating the directory on a USB device fails with an
+                # error message about permissions that seems
+                # inappropriate. Find out and activate the the
+                # following code again when solved.
+                #
+                # print "Do you want to create it (y/n)? "
+                # if ( gets.strip.match(/y/i) )
+                #     puts "Creating directory #{remote_path} (" +
+                #         @this_system.ruby_path_escape( remote_path ) + ")"
+                #     Dir.mkdir( @this_system.ruby_path_escape(remote_path) )
+                # else
+                #     next
+                # end
+            end
+            puts "#{remote_path} exists on remote disk."
+            # Either local and remote path exists or we have have jumped to
+            # the next sub directory with 'next' statement.
+            self.synchronize( local_path, remote_path, direction )
+        end
+    end
 
+    # Synchronize a local directory to a remote directory (:push) or vice
+    # versa (pull).
+    def synchronize( local_path, remote_path, direction = @direction )
+        # Construct Rsync call and go
+        if (direction == :push) 
+            source_path = local_path
+            target_path = remote_path
+        else
+            source_path = remote_path
+            target_path = local_path
+        end
+        rsync_call = [
+            @rsync_path,
+            @effective_rsync_options.join(' '),
+            @this_system.rsync_path_escape( File.join(source_path, '') ),
+            @this_system.rsync_path_escape(target_path)
+        ].join(' ')       
+        puts "Calling Rsync (#{direction}ing)"
+        puts rsync_call
+        system( rsync_call )
+        puts "Done."
+    end
+    
 end
 
 
 
-
+ds = DiskSynchronizer.new
+ds.synchronize_all(:push)
 
 
 
