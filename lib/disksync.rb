@@ -1,18 +1,25 @@
 require "disksync/version"
 
-# module Disksync
-#     # Your code goes here...
-# end
-
-# Allows access to information about the computer on which the code is
+# Class to manage information about the computer on which the code is
 # executed, e.g. retrieving the path to a recently mounted USB volume or the
 # type of Operating System.
 class ComputerSystem
 
+    # Where MacOS systems usually automount external volumes when connected.
     DefaultMacUsbMountPointParent = '/Volumes'
-    DefaultLinuxUsbMountPoint = ''
 
+    # Where Cygwin systems usually automount external volumes when connected.
+    DefaultCygwinUsbMountPointParent = '/cygdrive'
+
+    # To do: Where Cygwin systems usually automount external volumes when connected.
+    # DefaultLinuxUsbMountPoint = ''
+
+    # Symbol naming the Operating System (family) of this system (:mac,
+    # :linux, :cygwin).
     attr_reader :os
+
+    # Where to find the executable Rsync programme.
+    attr_reader :rsync_path
 
     def initialize()
         @os = case RUBY_PLATFORM
@@ -22,8 +29,10 @@ class ComputerSystem
         end
         @usb_parent_dir = case @os
             when :mac then DefaultMacUsbMountPointParent 
+            when :cygwin then DefaultCygwinUsbMountPoint
             else 'undefined'
         end
+        @rsync_path = `which rsync`.strip
     end
 
     # Escape paths as Rsync input on the specific OS
@@ -46,9 +55,12 @@ class ComputerSystem
         end
     end
 
+    # Returns the path of the most recently mounted volume. The logic is that
+    # when an external USB volume is connected for data synchronization, this
+    # can most often be identified as the most recent mount point in the
+    # system specific directory of mount points.
     def last_automounted_usb_volume()
         if (@os == :mac)
-            # Note that a USB device might contain spaces like in "USB DISK".
             File.join(
                 DefaultMacUsbMountPointParent,
                 Dir.entries(DefaultMacUsbMountPointParent).reject{ |f|
@@ -58,10 +70,18 @@ class ComputerSystem
                     File.ctime( File.join(@usb_parent_dir, b) )
                 }[-1]
             ) 
-        elsif (@os == :linux)
-            # Whatever will work for Linux goes here 
         elsif (@os == :cygwin)
-            # Whatever will work for Cygwin goes here
+            File.join(
+                DefaultCygwinUsbMountPointParentPath,
+                Dir.entries(DefaultCygwinUsbMountPointParent).reject{ |f|
+                    f.match(/\.\.?/)
+                }.sort{ |a,b|
+                    File.ctime( File.join(@usb_parent_dir, a) ) <=>
+                    File.ctime( File.join(@usb_parent_dir, b) )
+                }[-1]
+            ) 
+        elsif (@os == :linux)
+            # To do: Whatever will work for Linux goes here 
         else
             nil
         end
@@ -73,11 +93,11 @@ end
 # Can synchronize data between the user's directories (herein called 'local')
 # and another disk, herein called 'remote' system. 
 # Efficient use of this class works as follows:
-# # Instantiate it.
-# # Set @local_base_path (or leave default, DefaultLocalBasePath).
-# # Set @data_subdirs to an Array of subdirectory names (for non-BLOB data).
-# # Set @blob_subdirs to an Array of subdirectory names (for BLOBs).
-# # Call the synchronize_all() method.
+# 1. Instantiate it.
+# 2. Set @local_base_path (or leave default, DefaultLocalBasePath).
+# 3. Set @data_subdirs to an Array of subdirectory names (for non-BLOB data).
+# 4. Set @blob_subdirs to an Array of subdirectory names (for BLOBs).
+# 5. Call the synchronize_all() method.
 # 
 # Alternatively:
 # For individual directories you might as well call directly
@@ -93,11 +113,22 @@ class DiskSynchronizer
     DefaultDataRsyncOptions = [ '--delete' ]
     DefaultBlobRsyncOptions = [ '--size-only' ]
 
+    # Base path under which the data (and BLOB) directories are located on the
+    # local system.
     attr_accessor :local_base_path
+
+    # Base path under which the data (and BLOB) directories are located on the
+    # remote system (or USB volume).
     attr_accessor :remote_base_path
+
+    # Array of subdirectory names in which the data to be synchronized with
+    # the synchronize_all() method is located.
     attr_accessor :data_subdirs
+
+    # Array of subdirectory names in which the BlOB data to be synchronized
+    # with the synchronize_all() method is located.
     attr_accessor :blob_subdirs
-    attr_accessor :rsync_path
+
     attr_accessor :effective_rsync_options
 
     # Rsync options for the synchronization of data (i.e. not BLOBs).
@@ -120,7 +151,6 @@ class DiskSynchronizer
     attr_reader :this_system
 
     def initialize()
-        @rsync_path = `which rsync`.strip
         @data_rsync_options = DefaultRsyncOptions + DefaultDataRsyncOptions
         @blob_rsync_options = DefaultRsyncOptions + DefaultBlobRsyncOptions
         @effective_rsync_options = @data_rsync_options
@@ -201,7 +231,7 @@ class DiskSynchronizer
             target_path = local_path
         end
         rsync_call = [
-            @rsync_path,
+            @this_system.rsync_path,
             @effective_rsync_options.join(' '),
             @this_system.rsync_path_escape( File.join(source_path, '') ),
             @this_system.rsync_path_escape(target_path)
