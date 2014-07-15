@@ -129,6 +129,11 @@ class DiskSynchronizer
     # with the synchronize_all() method is located.
     attr_accessor :blob_subdirs
 
+    # Array of Strings, each representing Rsync options that will be used
+    # when Rsync is invoked next. The synchronize_all method sets it to
+    # an appropriate value. Otherwise the attributes @data_rsync_options and
+    # @blob_rsync_options, set automatically according to the system, come
+    # handy.
     attr_accessor :effective_rsync_options
 
     # Rsync options for the synchronization of data (i.e. not BLOBs).
@@ -150,6 +155,7 @@ class DiskSynchronizer
     # This computer system (OS, path conventions etc.)
     attr_reader :this_system
 
+    # Constructor. Sets default values for most settings.
     def initialize()
         @data_rsync_options = DefaultRsyncOptions + DefaultDataRsyncOptions
         @blob_rsync_options = DefaultRsyncOptions + DefaultBlobRsyncOptions
