@@ -1,257 +1,246 @@
-require "disksync/version"
+$:.push('.') # For local non-Gem tests only. Remove.
+require 'disksync/version'
+require 'disksync/computersystem'
+require 'pp'
 
-# Class to manage information about the computer on which the code is
-# executed, e.g. retrieving the path to a recently mounted USB volume or the
-# type of Operating System.
-class ComputerSystem
+# Synchronization of files to external hard disks or to remote systems.
+#
+# Minimal example: The following will synchronize all subdirectories of your
+# home directory onto the corresponding file on a USB device mounted under
+# /Volumes/MYDISK:
+#
+#     ds = Disksync::DiskSynchronizer.new()
+#     ds.remote_path = '/Volumes/MYDISK'
+#     ds.synchronize_all
+#
+# Example using SSH on a remote system nas.home.test where your username is
+# 'boss' and you connect with an RSA private key 'me_rsa' that is located in
+# your .ssh directory::
+#
+#    ds = Disksync::DiskSynchronizer.new()
+#    ds.local_base_path = 'Documents'
+#    ds.data_subdirs = ['Lyrics', 'Stories']
+#    ds.blob_subdirs = ['Music']
+#    ds.add_ssh_option( {key: 'me_rsa', host: 'nas.home.test', uid: 'boss'} )
+#    ds.synchronize_all
+#
+module Disksync
 
-    # Where MacOS systems usually automount external volumes when connected.
-    DefaultMacUsbMountPointParent = '/Volumes'
-
-    # Where Cygwin systems usually automount external volumes when connected.
-    DefaultCygwinUsbMountPointParent = '/cygdrive'
-
-    # To do: Where Cygwin systems usually automount external volumes when connected.
-    # DefaultLinuxUsbMountPoint = ''
-
-    # Symbol naming the Operating System (family) of this system (:mac,
-    # :linux, :cygwin).
-    attr_reader :os
-
-    # Where to find the executable Rsync programme.
-    attr_reader :rsync_path
-
-    def initialize()
-        @os = case RUBY_PLATFORM
-            when /darwin/i then :mac
-            when /linux/i then :linux
-            when /cygwin/i then :cygwin
-        end
-        @usb_parent_dir = case @os
-            when :mac then DefaultMacUsbMountPointParent 
-            when :cygwin then DefaultCygwinUsbMountPoint
-            else 'undefined'
-        end
-        @rsync_path = `which rsync`.strip
-    end
-
-    # Escape paths as Rsync input on the specific OS
-    def rsync_path_escape( path )
-        if (@os == :mac)
-            '"' + path + '"'
-        else
-            # Adapt to other OSs if necessary
-            '"' + path + '"'
-        end
-    end
-
-    # Escape paths for directory handling (e.g. Dir::mkdir)
-    def ruby_path_escape( path )
-        if (@os == :mac)
-            '"' + path + '"'
-        else
-            # Adapt to other OSs if necessary
-            '"' + path + '"'
-        end
-    end
-
-    # Returns the path of the most recently mounted volume. The logic is that
-    # when an external USB volume is connected for data synchronization, this
-    # can most often be identified as the most recent mount point in the
-    # system specific directory of mount points.
-    def last_automounted_usb_volume()
-        if (@os == :mac)
-            File.join(
-                DefaultMacUsbMountPointParent,
-                Dir.entries(DefaultMacUsbMountPointParent).reject{ |f|
-                    f.match(/\.\.?/)
-                }.sort{ |a,b|
-                    File.ctime( File.join(@usb_parent_dir, a) ) <=>
-                    File.ctime( File.join(@usb_parent_dir, b) )
-                }[-1]
-            ) 
-        elsif (@os == :cygwin)
-            File.join(
-                DefaultCygwinUsbMountPointParentPath,
-                Dir.entries(DefaultCygwinUsbMountPointParent).reject{ |f|
-                    f.match(/\.\.?/)
-                }.sort{ |a,b|
-                    File.ctime( File.join(@usb_parent_dir, a) ) <=>
-                    File.ctime( File.join(@usb_parent_dir, b) )
-                }[-1]
-            ) 
-        elsif (@os == :linux)
-            # To do: Whatever will work for Linux goes here 
-        else
-            nil
-        end
-    end
-
-end
-
-
-# Can synchronize data between the user's directories (herein called 'local')
-# and another disk, herein called 'remote' system. 
-# Efficient use of this class works as follows:
-# 1. Instantiate it.
-# 2. Set @local_base_path (or leave default, DefaultLocalBasePath).
-# 3. Set @data_subdirs to an Array of subdirectory names (for non-BLOB data).
-# 4. Set @blob_subdirs to an Array of subdirectory names (for BLOBs).
-# 5. Call the synchronize_all() method.
-# 
-# Alternatively:
-# For individual directories you might as well call directly
-# synchronize_subdir_list(), passing the names of the subdirectories to be
-# synchronized in an Array. In that case, before calling
-# synchronize_subdir_list(), set @effective_rsync_options appropriately.
-class DiskSynchronizer
-
-    DefaultLocalBasePath  = File.join( ENV['HOME'], '_local_working_copy' )
-    DefaultDataSubdirs = [ 'MeineDokumente', '_security' ]
+    DefaultDataDir     = '_local_working_copy'
     DefaultBlobSubdirs = [ 'BLOBs' ]
-    DefaultRsyncOptions = [ '-rtv', '--modify-window=2' ]
-    DefaultDataRsyncOptions = [ '--delete' ]
-    DefaultBlobRsyncOptions = [ '--size-only' ]
+    DefaultDataRsyncOptions = {
+                                standard:      '-rtv',
+                                timetolerance: '--modify-window=2',
+                                # deletions:     '--delete'
+                              }
+    DefaultBlobRsyncOptions = {
+                                standard:      '-rtv',
+                                timetolerance: '--modify-window=2',
+                                timecheck:     '--size-only'
+                              }
 
-    # Base path under which the data (and BLOB) directories are located on the
-    # local system.
-    attr_accessor :local_base_path
 
-    # Base path under which the data (and BLOB) directories are located on the
-    # remote system (or USB volume).
-    attr_accessor :remote_base_path
+    # Can synchronize data between the user's directories (herein called 'local')
+    # and another disk, herein called 'remote' system. 
+    # Efficient use of this class works as follows:
+    # 1. Instantiate it.
+    # 2. Set @local_base_path (default is your home directory)
+    # 3. Put some directory names under this into @data_subdirs. The default
+    #    for this will be all directories in your home which might be by far more
+    #    than you are willing to synchronize.
+    # 4. Directories with large binary files might go into @blob_subdirs
+    #    instead. That will avoid deletions and consider a file  unchanged if
+    #    it still has the same file size.
+    # 5. Call the synchronize_all() method.
+    # 
+    # Alternatively:
+    # For individual directories you might as well call directly
+    # synchronize_subdir_list(), passing the names of the subdirectories to be
+    # synchronized in an Array. In that case, before calling
+    # synchronize_subdir_list(), set @effective_rsync_options appropriately.
+    class DiskSynchronizer
 
-    # Array of subdirectory names in which the data to be synchronized with
-    # the synchronize_all() method is located.
-    attr_accessor :data_subdirs
+        # Base path under which the data (and BLOB) directories are located on the
+        # local system. Defaults to directory DefaultDataDir (constant value)
+        # in the home directory of the user.
+        # Writer (setter) method implemented separately.
+        attr_reader :local_base_path
 
-    # Array of subdirectory names in which the BlOB data to be synchronized
-    # with the synchronize_all() method is located.
-    attr_accessor :blob_subdirs
+        # Base path under which the data (and BLOB) directories are located on the
+        # remote system (or USB volume). Defaults to directory DefaultDataDir
+        # (constant value) in the home directory on the remote system (or root
+        # of the USB volume).
+        attr_accessor :remote_base_path
 
-    # Array of Strings, each representing Rsync options that will be used
-    # when Rsync is invoked next. The synchronize_all method sets it to
-    # an appropriate value. Otherwise the attributes @data_rsync_options and
-    # @blob_rsync_options, set automatically according to the system, come
-    # handy.
-    attr_accessor :effective_rsync_options
+        # Remote host for synchronization over SSH. This is set when the SSH
+        # option is defined and removed when the SSH option gets disabled.
+        attr_accessor :remote_host
 
-    # Rsync options for the synchronization of data (i.e. not BLOBs).
-    # It should be possible to add appropriate optinos (-e) for Rsync-over-SSH.
-    # This attribute is an Array of Strings that get joined with a space
-    # character when included in Rsync calls.
-    attr_accessor :data_rsync_options
+        # Array of subdirectory names in which the data to be synchronized with
+        # the synchronize_all() method is located. Defaults to the elements of
+        # the constant Array DefaultDataSubdirs.
+        attr_accessor :data_subdirs
 
-    # Rsync options for the synchronization of BLOBs.
-    # It should be possible to add appropriate optinos (-e) for Rsync-over-SSH.
-    # This attribute is an Array of Strings that get joined with a space
-    # character when included in Rsync calls.
-    attr_accessor :blob_rsync_options
+        # Array of subdirectory names in which the BlOB data to be
+        # synchronized with the synchronize_all() method is located. Defaults
+        # to the elements of the constant Array DefaultBlobSubdirs.
+        attr_accessor :blob_subdirs
 
-    # Direction of synchronization. Can be :push (from local to remote) or
-    # :pull (vice versa). 
-    attr_accessor :direction
+        # Hash with Rsync options for the synchronization of BLOB data.
+        # Having this set permanently available should allow easily to switch
+        # between BLOB and normal data transfer - by assigning this value to the
+        # @effective_rsync_options before the call of the synchronize() method
+        # or other methods that invoke Rsync system calls.
+        attr_accessor :effective_rsync_options
 
-    # This computer system (OS, path conventions etc.)
-    attr_reader :this_system
+        # Rsync options for the synchronization of data (i.e. not BLOBs).
+        # Having this set permanently available should allow easily to switch
+        # between data and BLOB data transfer - by assigning this value to the
+        # @effective_rsync_options before the call of the synchronize() method
+        # or other methods that invoke Rsync system calls.
+        attr_accessor :data_rsync_options
 
-    # Constructor. Sets default values for most settings.
-    def initialize()
-        @data_rsync_options = DefaultRsyncOptions + DefaultDataRsyncOptions
-        @blob_rsync_options = DefaultRsyncOptions + DefaultBlobRsyncOptions
-        @effective_rsync_options = @data_rsync_options
-        @local_base_path  = DefaultLocalBasePath
-        @this_system = ComputerSystem.new
-        @remote_base_path = @this_system.last_automounted_usb_volume()
-        @data_subdirs = DefaultDataSubdirs
-        @blob_subdirs = DefaultBlobSubdirs
-        @direction = :push
-    end
+        # Rsync options for the synchronization of BLOBs.
+        # It should be possible to add appropriate optinos (-e) for Rsync-over-SSH.
+        # This attribute is an Array of Strings that get joined with a space
+        # character when included in Rsync calls.
+        attr_accessor :blob_rsync_options
 
-    # Synchronize all subdirectories contained in @data_subdirs and
-    # @blob_subdirs, applying the appropriate rsync options for data and BLOBs
-    # accordingly.
-    def synchronize_all( direction = @direction )
-        puts "Preparing to #{direction} all data and BLOB directories."
-        @effective_rsync_options = @data_rsync_options
-        self.synchronize_subdir_list( @data_subdirs, direction )
-        @effective_rsync_options = @blob_rsync_options
-        self.synchronize_subdir_list( @blob_subdirs, direction )
-    end
+        # Direction of synchronization. Can be :push (default, meaning from
+        # local to remote) or :pull (vice versa). 
+        attr_accessor :direction
 
-    # Synchronize a list of subdirectories from @local_base_path to
-    # @remote_base_path (when direction is :push) or in the opposite
-    # direction (when direction is :pull).
-    # Subdirectories (subdirs) that do not exist in the @local_base_path or in
-    # the @remote_base_path get skipped. Thus, when pushing to a remote disk
-    # make sure the top level directories are existing.
-    def synchronize_subdir_list( subdirs, direction = @direction )
-        puts "\nTrying to #{direction} the following subdirectories:"
-        subdirs.each { |d| puts "  - #{d}" }
-        subdirs.each do |d|
-            puts "\n#{d}:"
-            local_path = File.join( @local_base_path, d )
-            unless File.directory?(local_path)
-                puts "#{local_path} not on local disk. Skipped!"
-                next
-            end
-            puts "#{local_path} exists on local disk."
-            remote_path = File.join( @remote_base_path, d ) 
-            unless File.directory?(remote_path)
-                puts "#{remote_path} does not exist on remote disk. Skipped!"
-                next
-                # To do:
-                # Creating the directory on a USB device fails with an
-                # error message about permissions that seems
-                # inappropriate. Find out and activate the the
-                # following code again when solved.
-                #
-                # print "Do you want to create it (y/n)? "
-                # if ( gets.strip.match(/y/i) )
-                #     puts "Creating directory #{remote_path} (" +
-                #         @this_system.ruby_path_escape( remote_path ) + ")"
-                #     Dir.mkdir( @this_system.ruby_path_escape(remote_path) )
-                # else
-                #     next
-                # end
-            end
-            puts "#{remote_path} exists on remote disk."
-            # Either local and remote path exists or we have have jumped to
-            # the next sub directory with 'next' statement.
-            self.synchronize( local_path, remote_path, direction )
+        # This computer system (OS, path conventions etc.) as a ComputerSystem
+        # instance.
+        attr_reader :myhost
+
+        # Constructor. Sets default values for most settings.
+        def initialize()
+            @myhost = ComputerSystem.new
+            @local_base_path = @myhost.user_home_dir # default
+            @data_rsync_options = DefaultDataRsyncOptions
+            @blob_rsync_options = DefaultBlobRsyncOptions
+            @effective_rsync_options = @data_rsync_options
         end
+
+        # Set the @local_base_path attribute.
+        # The path may an be absolute path (i.e. start with '/') or a path
+        # relative to the user's home directory.
+        def local_base_path=(path)
+            if ( path.start_with?('/') )
+                @local_base_path = path
+            else
+                @local_base_path = File.join(@myhost.user_home_dir, path)
+            end
+        end
+
+        def ssh?()
+            @effective_rsync_options.has_key?(:ssh)
+        end
+
+        # Configure for transferring the data to/from a remote host via SSH.
+        # This manipulates @data_rsync_options, @blob_rsync_options, but also the
+        # @effective_rsync_options.
+        # Argument can be a Hash with the following keys (examples):
+        # ssh_path (system's path to ssh executable, e.g. '/usr/bin/ssh',
+        # detected automatically), user_id (ID of the user executing
+        # the SSH call, detected automatically), key_path (path to the private
+        # RSA key, defaults to $HOME/.ssh/id_rsa, host (not needed for the SSH
+        # option but to set the @remote_host to a FQDN of the remote host
+        # involved in the synchronization.
+        def add_ssh_option( ssh_settings = {} )
+            ssh_path = ssh_settings[:ssh] || @myhost.ssh_path
+            user_id = ssh_settings[:uid]  || @myhost.user_id
+            key_path =
+                if ( File.exist?(ssh_settings[:key]) )
+                    ssh_settings[:key]
+                elsif ( File.exist?( p = File.join(
+                                           @myhost.default_private_key_dir,
+                                           ssh_settings[:key])) )
+                       p
+                elsif ( File.exist?(@myhost.default_private_key_path) )
+                    @myhost.default_private_key_path
+                else
+                    raise "Cannot find private key for SSH"
+                end
+            ssh_option = "-e '#{ssh_path} -i #{key_path} -l #{user_id}'"
+            @data_rsync_options[:ssh]      = ssh_option
+            @blob_rsync_options[:ssh]      = ssh_option
+            @effective_rsync_options[:ssh] = ssh_option
+            @remote_host = ssh_settings[:host]
+            @ssh = true
+            @direction = :push
+        end
+
+        # Take out the SSH aspect of the data synchronization. This will
+        # modify theremote_base_path (when direction is :push) or in the opposite
+        # direction (when direction is :pull).
+        # The first argument is an Array of subdirectories, i.e. directories
+        # below the base path, that should get synchronized. The second
+        # argument is the direction which can be :push (default, i.e. move
+        # data from the local system ro remote system or USB disk) or :pull
+        # (vice versa).
+        # Subdirectories (subdirs) that do not exist in the @local_base_path or in
+        # the @remote_base_path get skipped. Thus, when pushing to a remote disk
+        # make sure the top level directories are existing.
+        def synchronize_subdir_list( subdirs, direction = @direction )
+            puts "\nTrying to #{direction.to_s} the following subdirectories:"
+            subdirs.each { |d| puts "  - #{d}" }
+            subdirs.each do |d|
+                puts "\n#{d}:"
+                local_path = File.join( @local_base_path, d )
+                unless File.directory?(local_path)
+                    puts "#{local_path} not on local disk. Skipped!"
+                    next
+                end
+                puts "#{local_path} exists on local disk."
+                if ( @remote_base_path.nil? )
+                    if ( self.ssh? )
+                        @remote_base_path = ''
+                    else
+                        @myhost.guess_usb_volume
+                    end
+                end
+                if ( self.ssh? )
+                    remote_path = "#{@remote_host}:" +
+                          ( (@remote_base_path.empty?) ?
+                            (d) :
+                            (File.join(@remote_base_path, d)) )
+                else
+                    remote_path = File.join( @remote_base_path, d )
+                end
+                self.synchronize( local_path, remote_path, direction )
+            end
+        end
+
+        # Synchronize a local directory to a remote directory (direction :push) or
+        # vice versa (direction :pull). The path names are full path names. You
+        # can use this method, but it is recommended to set the base directories
+        # and the subdirectory lists (@data_subdirs, @blob_subdirs)
+        # correctly and then use the synchronize_all().
+        def synchronize( local_path, remote_path, direction = @direction )
+            # Construct Rsync call and go
+            if (direction == :push) 
+                source_path = local_path
+                target_path = remote_path
+            else
+                source_path = remote_path
+                target_path = local_path
+            end
+            rsync_call = [
+                @myhost.rsync_path,
+                @effective_rsync_options.values.join(' '),
+                @myhost.rsync_path_escape( File.join(source_path, '') ),
+                @myhost.rsync_path_escape(target_path)
+            ].join(' ')       
+            puts "Calling Rsync (#{direction.to_s}ing)"
+            puts rsync_call
+            result = system( rsync_call )
+            # To do: Evaluate return value including error handling
+            puts "Done."
+        end
+
     end
 
-    # Synchronize a local directory to a remote directory (direction :push) or
-    # vice versa (direction :pull). The path names are full path names. You
-    # can use this method, but it is recommended to set the base directories
-    # and the subdirectory lists (@data_subdirs, @blob_subdirs)
-    # correctly and then use the synchronize_all().
-    def synchronize( local_path, remote_path, direction = @direction )
-        # Construct Rsync call and go
-        if (direction == :push) 
-            source_path = local_path
-            target_path = remote_path
-        else
-            source_path = remote_path
-            target_path = local_path
-        end
-        rsync_call = [
-            @this_system.rsync_path,
-            @effective_rsync_options.join(' '),
-            @this_system.rsync_path_escape( File.join(source_path, '') ),
-            @this_system.rsync_path_escape(target_path)
-        ].join(' ')       
-        puts "Calling Rsync (#{direction}ing)"
-        puts rsync_call
-        system( rsync_call )
-        puts "Done."
-    end
-    
 end
-
-
-
-
-
 
