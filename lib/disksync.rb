@@ -1,7 +1,5 @@
 $:.push('.') # For local non-Gem tests only. Remove.
 require 'disksync/version'
-require 'disksync/computersystem'
-require 'pp'
 
 # Synchronization of files to external hard disks or to remote systems.
 #
@@ -26,19 +24,28 @@ require 'pp'
 #
 module Disksync
 
-    DefaultDataDir     = '_local_working_copy'
     DefaultBlobSubdirs = [ 'BLOBs' ]
+
+    # Default options set for the transmission of normal (non-BLOB) data.
     DefaultDataRsyncOptions = {
                                 standard:      '-rtv',
                                 timetolerance: '--modify-window=2',
-                                # deletions:     '--delete'
+                                deletions:     '--delete'
                               }
+
+    # Default options set for the transmission of BLOB directories: Files
+    # comparison is limited to file size only. This avoids transmission of
+    # files where only the timestamp has been modified (usually by accident
+    # without changing the file content).
     DefaultBlobRsyncOptions = {
                                 standard:      '-rtv',
                                 timetolerance: '--modify-window=2',
                                 timecheck:     '--size-only'
                               }
 
+    # What standard private key files to search for if nothing is configured
+    # or specified when setting the SSH option.
+    DefaultKeyFilenames = %w(id_rsa id_dsa id_ecdsa)
 
     # Can synchronize data between the user's directories (herein called 'local')
     # and another disk, herein called 'remote' system. 
@@ -61,14 +68,14 @@ module Disksync
     class DiskSynchronizer
 
         # Base path under which the data (and BLOB) directories are located on the
-        # local system. Defaults to directory DefaultDataDir (constant value)
-        # in the home directory of the user.
+        # local system. Defaults to the user's home directory.
         # Writer (setter) method implemented separately.
         attr_reader :local_base_path
 
         # Base path under which the data (and BLOB) directories are located on the
-        # remote system (or USB volume). Defaults to directory DefaultDataDir
-        # (constant value) in the home directory on the remote system (or root
+        # remote system (or USB volume). Defaults to the user's home
+        # directory on the remote system or to the root path on the connected
+        # USB volume.
         # of the USB volume).
         attr_accessor :remote_base_path
 
@@ -110,16 +117,12 @@ module Disksync
         # local to remote) or :pull (vice versa). 
         attr_accessor :direction
 
-        # This computer system (OS, path conventions etc.) as a ComputerSystem
-        # instance.
-        attr_reader :myhost
-
         # Constructor. Sets default values for most settings.
         def initialize()
-            @myhost = ComputerSystem.new
-            @local_base_path = @myhost.user_home_dir # default
+            @local_base_path = Dir.home
             @data_rsync_options = DefaultDataRsyncOptions
             @blob_rsync_options = DefaultBlobRsyncOptions
+            @rsync_bin_path = `which rsync`.strip
             @effective_rsync_options = @data_rsync_options
         end
 
@@ -130,7 +133,7 @@ module Disksync
             if ( path.start_with?('/') )
                 @local_base_path = path
             else
-                @local_base_path = File.join(@myhost.user_home_dir, path)
+                @local_base_path = File.join(Dir.home, path)
             end
         end
 
@@ -141,35 +144,49 @@ module Disksync
         # Configure for transferring the data to/from a remote host via SSH.
         # This manipulates @data_rsync_options, @blob_rsync_options, but also the
         # @effective_rsync_options.
-        # Argument can be a Hash with the following keys (examples):
-        # ssh_path (system's path to ssh executable, e.g. '/usr/bin/ssh',
-        # detected automatically), user_id (ID of the user executing
-        # the SSH call, detected automatically), key_path (path to the private
-        # RSA key, defaults to $HOME/.ssh/id_rsa, host (not needed for the SSH
-        # option but to set the @remote_host to a FQDN of the remote host
-        # involved in the synchronization.
+        #
+        # If the SSH connection is configured in the SSH config file
+        # (something like ~/.ssh/config) it is assumed that the FQDN
+        # (HostName), the remote user (User), and the private key file
+        # (IdentityFile) are configured properly for this host.
         def add_ssh_option( ssh_settings = {} )
-            ssh_path = ssh_settings[:ssh] || @myhost.ssh_path
-            user_id = ssh_settings[:uid]  || @myhost.user_id
-            key_path =
-                if ( File.exist?(ssh_settings[:key]) )
-                    ssh_settings[:key]
-                elsif ( File.exist?( p = File.join(
-                                           @myhost.default_private_key_dir,
-                                           ssh_settings[:key])) )
-                       p
-                elsif ( File.exist?(@myhost.default_private_key_path) )
-                    @myhost.default_private_key_path
-                else
-                    raise "Cannot find private key for SSH"
-                end
-            ssh_option = "-e '#{ssh_path} -i #{key_path} -l #{user_id}'"
+            ssh_config_path = File.join(Dir.home, '.ssh', 'config')
+            ssh_bin_path = `which ssh`.strip
+            # ssh_spec is an Array of elements what follow Rsync's -e option
+            # in single quotes):
+            ssh_spec = [ssh_bin_path]
+            @remote_host = ssh_settings[:host] 
+            if (File.readlines(ssh_config_path).grep(/#{@remote_host}/).any?)
+                # SSH is configured in .ssh/config file.
+                # Leave FQDN, username, or key file to this config
+            elsif ( File.exist?(ssh_settings[:key]) )
+                # Full path to private key was specified.
+                # Use this file.
+                ssh_spec << "-i #{ssh_settings[:key]}"
+            elsif ( File.exist?( p = File.join(Dir.home,
+                                               '.ssh',
+                                               ssh_settings[:key]) ) )
+                ssh_spec << "-i #{p}"
+            end
+            # To do: We could check if the username is configured in
+            # .ssh/config at all and use ENV['USERNAME'] if it is not.
+            if ( ssh_settings[:uid] )
+                ssh_spec << "-l #{ssh_settings[:uid]}"
+            end
+            ssh_option = %q(-e ') + ssh_spec.join(' ') + %q(')
             @data_rsync_options[:ssh]      = ssh_option
             @blob_rsync_options[:ssh]      = ssh_option
             @effective_rsync_options[:ssh] = ssh_option
-            @remote_host = ssh_settings[:host]
             @ssh = true
             @direction = :push
+        end
+
+        # Synchronize all directories in @data_subdirs and @blob_subdirs.
+        def synchronize_all( direction = @direction )
+            @effective_rsync_options = @data_rsync_options
+            synchronize_subdir_list( @data_subdirs )
+            @effective_rsync_options = @blob_rsync_options
+            synchronize_subdir_list( @blob_subdirs )
         end
 
         # Take out the SSH aspect of the data synchronization. This will
@@ -228,10 +245,10 @@ module Disksync
                 target_path = local_path
             end
             rsync_call = [
-                @myhost.rsync_path,
+                @rsync_bin_path,
                 @effective_rsync_options.values.join(' '),
-                @myhost.rsync_path_escape( File.join(source_path, '') ),
-                @myhost.rsync_path_escape(target_path)
+                ('"' + File.join(source_path, '') + '"'),
+                ('"' + target_path + '"')
             ].join(' ')       
             puts "Calling Rsync (#{direction.to_s}ing)"
             puts rsync_call
