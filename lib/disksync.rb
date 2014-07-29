@@ -155,7 +155,7 @@ module Disksync
             # ssh_spec is an Array of elements what follow Rsync's -e option
             # in single quotes):
             ssh_spec = [ssh_bin_path]
-            @remote_host = ssh_settings[:host] 
+            @remote_host = ssh_settings[:host] if ssh_settings.has_key?(:host)
             if (File.readlines(ssh_config_path).grep(/#{@remote_host}/).any?)
                 # SSH is configured in .ssh/config file.
                 # Leave FQDN, username, or key file to this config
@@ -178,15 +178,29 @@ module Disksync
             @blob_rsync_options[:ssh]      = ssh_option
             @effective_rsync_options[:ssh] = ssh_option
             @ssh = true
-            @direction = :push
         end
 
         # Synchronize all directories in @data_subdirs and @blob_subdirs.
         def synchronize_all( direction = @direction )
+            if (@data_subdirs.nil? or @data_subdirs.empty?)
+                puts  "No subirectories specified for synchronization."
+                print "Synchronize all under #{@local_base_path} (y/n)?"
+                go = gets.chomp
+                if (go == 'y')
+                    @data_subdirs = Dir.entries(@local_base_path).select{ |d|
+                                        d.directory?
+                                    }.reject{ |d| d.match(/^\.\.?$/) }
+                else
+                    puts "No subdirectory means nothing to do. Aborting."
+                    exit
+                end
+            end
             @effective_rsync_options = @data_rsync_options
-            synchronize_subdir_list( @data_subdirs )
-            @effective_rsync_options = @blob_rsync_options
-            synchronize_subdir_list( @blob_subdirs )
+            synchronize_subdir_list( @data_subdirs, direction )
+            if (@blob_subdirs)
+                @effective_rsync_options = @blob_rsync_options
+                synchronize_subdir_list( @blob_subdirs, direction )
+            end
         end
 
         # Take out the SSH aspect of the data synchronization. This will
@@ -201,6 +215,9 @@ module Disksync
         # the @remote_base_path get skipped. Thus, when pushing to a remote disk
         # make sure the top level directories are existing.
         def synchronize_subdir_list( subdirs, direction = @direction )
+            if ( subdirs.nil? or subdirs.empty? )
+                raise ArgumentError, "No subdirectories specified for synchronization."
+            end
             puts "\nTrying to #{direction.to_s} the following subdirectories:"
             subdirs.each { |d| puts "  - #{d}" }
             subdirs.each do |d|
