@@ -124,6 +124,7 @@ module Disksync
             @blob_rsync_options = DefaultBlobRsyncOptions
             @rsync_bin_path = `which rsync`.strip
             @effective_rsync_options = @data_rsync_options
+            @direction = :push
         end
 
         # Set the @local_base_path attribute.
