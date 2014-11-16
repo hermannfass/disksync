@@ -186,7 +186,7 @@ module Disksync
             if (@data_subdirs.nil? or @data_subdirs.empty?)
                 puts  "No subirectories specified for synchronization."
                 print "Synchronize all under #{@local_base_path} (y/n)?"
-                go = gets.chomp
+                go = gets.strip
                 if (go == 'y')
                     @data_subdirs = Dir.entries(@local_base_path).select{ |d|
                                         d.directory?
