@@ -32,8 +32,8 @@ Or install it yourself as:
 
 require 'disksync'
 
-sync = DiskSynchronizer.new( '~/mydata', '/Volumes/myusb/mydata' )
-sync.pull
+    sync = DiskSynchronizer.new( '~/mydata', '/Volumes/myusb/mydata' )
+    sync.pull
 
 
 ## Contributing
