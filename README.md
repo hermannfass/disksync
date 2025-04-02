@@ -9,7 +9,7 @@ changes on other systems by means of a USB disk. This includes considerations
 like available disk space: You do not want to push your video collection to a
 4 GB USB stick.
 
-Rsync via SSH will be supported as well.
+Rsync via SSH is supported as well.
 
 At the time of writing this project has just started, so that the code is not
 supposed to work or to be used.
